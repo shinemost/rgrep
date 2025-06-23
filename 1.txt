@@ -3,3 +3,6 @@ hello world
 xxx
 123123
 xxxxxxxx1231
+abc
+Hello world. This is an exmaple text
+Help me! I need assistant!

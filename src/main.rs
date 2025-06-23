@@ -1,4 +1,5 @@
 use clap::Parser;
+use regex::Regex;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -19,12 +20,14 @@ fn main() {
 
     let file = File::open(cli.file.unwrap()).unwrap();
     let reader = BufReader::new(file);
-    
-    for (line_num, line) in reader.lines().enumerate() {
-        let line = line.unwrap();
 
-        if let Some(text) = cli.text.as_deref() {
-            if line.contains(text) {
+    if let Some(text) = cli.text.as_deref() {
+        let regex = Regex::new(text).unwrap();
+
+        // 正则匹配
+        for (line_num, line) in reader.lines().enumerate() {
+            let line = line.unwrap();
+            if line.contains(text) || regex.is_match(&line) {
                 println!("{} : {}", line_num + 1, line);
             }
         }
