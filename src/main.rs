@@ -2,92 +2,106 @@ use clap::Parser;
 use colored::Colorize;
 use glob::glob;
 use regex::Regex;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::{
+    fs::File,
+    io::{BufRead, BufReader},
+    path::PathBuf,
+};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
-    /// 需要识别的文本或者正则表达式
+    /// Text or regex pattern to search for
     #[arg(value_name = "TEXT")]
-    text: Option<String>,
+    pattern: Option<String>,
 
-    /// 需要做文本匹配的文件，支持通配符
+    /// Files to search (supports glob patterns)
     #[arg(value_name = "FILE")]
-    file: Option<String>,
+    files: Option<String>,
 }
 
 fn main() {
     let cli = Cli::parse();
+    if let Some(pattern) = &cli.pattern {
+        println!("Searching for pattern: {}", pattern);
+    }
 
-    for ref path in glob(&cli.file.clone().unwrap())
-        .unwrap()
-        .filter_map(Result::ok)
-    {
-        read_file(path, cli.text.clone());
+    if let Some(files_pattern) = &cli.files {
+        for path in glob(files_pattern).unwrap().filter_map(Result::ok) {
+            if let Some(pattern) = &cli.pattern {
+                process_file(&path, pattern);
+            }
+        }
     }
 }
 
-fn read_file(path: &PathBuf, text: Option<String>) {
-    let file = File::open(path).unwrap();
+fn process_file(path: &PathBuf, pattern: &str) {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) => {
+            eprintln!("Failed to open {}: {}", path.display(), e);
+            return;
+        }
+    };
+
+    let regex = match Regex::new(pattern) {
+        Ok(re) => re,
+        Err(e) => {
+            eprintln!("Invalid regex pattern '{}': {}", pattern, e);
+            return;
+        }
+    };
+
+    let mut has_matches = false;
     let reader = BufReader::new(file);
 
-    let mut has_match = false;
-    let mut matched_lines = Vec::new();
-
-    if let Some(ref text) = text {
-        let regex = Regex::new(&format!(r"{}", text)).unwrap();
-        for (line_num, line) in reader.lines().enumerate() {
-            let line = line.unwrap();
-            if line.contains(text.as_str()) || regex.is_match(&line) {
-                if !has_match {
-                    // 第一次匹配时打印文件名
-                    println!("{}:", path.display());
-                    has_match = true;
-                }
-                matched_lines.push((line_num, line));
+    for (line_num, line) in reader.lines().enumerate() {
+        let line = match line {
+            Ok(line) => line,
+            Err(e) => {
+                eprintln!(
+                    "Error reading line {} in {}: {}",
+                    line_num + 1,
+                    path.display(),
+                    e
+                );
+                continue;
             }
-        }
-    }
+        };
 
-    // 打印所有匹配的行
-    for (line_num, line) in matched_lines {
-        print_match_result(text.clone(), line_num, line);
+        if let Some(highlighted) = highlight_match(&line, line_num, pattern, &regex) {
+            if !has_matches {
+                println!("{}:", path.display());
+                has_matches = true;
+            }
+            println!("{}", highlighted);
+        }
     }
 }
 
-fn print_match_result(text: Option<String>, line_num: usize, line: String) {
-    if let Some(text) = text {
-        if line.contains(text.as_str()) {
-            let pos = line.find(text.as_str()).unwrap();
-            let (before, matched) = line.split_at(pos);
-            let (matched, after) = matched.split_at(text.len());
-
-            println!(
-                "{}:{} {}{}{}",
-                (line_num + 1).to_string().blue(),
-                (pos + 1).to_string().green(),
-                before,
-                matched.red().bold(),
-                after
-            );
-        } else {
-            // 处理正则表达式匹配
-            let regex = Regex::new(&format!(r"{}", text)).unwrap();
-            if let Some(m) = regex.find(&line) {
-                let (before, matched) = line.split_at(m.start());
-                let (matched, after) = matched.split_at(m.end() - m.start());
-
-                println!(
-                    "{}:{} {}{}{}",
-                    (line_num + 1).to_string().blue(),
-                    (m.start() + 1).to_string().green(),
-                    before,
-                    matched.red().bold(),
-                    after
-                );
-            }
-        }
+fn highlight_match(line: &str, line_num: usize, pattern: &str, regex: &Regex) -> Option<String> {
+    if line.contains(pattern) {
+        // Simple string match
+        let pos = line.find(pattern).unwrap();
+        Some(format!(
+            "{}:{} {}{}{}",
+            (line_num + 1).to_string().blue(),
+            (pos + 1).to_string().green(),
+            &line[..pos],
+            &line[pos..pos + pattern.len()].red().bold(),
+            &line[pos + pattern.len()..]
+        ))
+    } else if let Some(m) = regex.find(line) {
+        // Regex match
+        Some(format!(
+            "{}:{} {}{}{}",
+            (line_num + 1).to_string().blue(),
+            (m.start() + 1).to_string().green(),
+            &line[..m.start()],
+            &line[m.start()..m.end()].red().bold(),
+            &line[m.end()..]
+        ))
+    } else {
+        None
     }
 }
