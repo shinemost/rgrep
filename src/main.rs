@@ -1,7 +1,9 @@
 use clap::Parser;
 use colored::Colorize;
 use glob::glob;
+use rayon::prelude::*;
 use regex::Regex;
+use std::sync::Arc;
 use std::{
     fs::File,
     io::{BufRead, BufReader},
@@ -29,25 +31,33 @@ struct SearchPattern {
 fn main() {
     let cli = Cli::parse();
 
-    // 提前编译正则表达式，只需要执行一次
-    let search_pattern = cli.pattern.as_ref().map(|pattern| SearchPattern {
-        text: pattern.clone(),
-        regex: Regex::new(pattern).unwrap_or_else(|e| {
-            eprintln!("Invalid regex pattern '{}': {}", pattern, e);
-            std::process::exit(1);
-        }),
+    // 提前编译正则表达式并包装在Arc中以便共享，在线程间共享需要将变量包裹在Arc里
+    let search_pattern = cli.pattern.as_ref().map(|pattern| {
+        Arc::new(SearchPattern {
+            text: pattern.clone(),
+            regex: Regex::new(pattern).unwrap_or_else(|e| {
+                eprintln!("Invalid regex pattern '{}': {}", pattern, e);
+                std::process::exit(1);
+            }),
+        })
     });
 
     if let Some(files_pattern) = &cli.files {
-        for path in glob(files_pattern).unwrap().filter_map(Result::ok) {
+        let files = glob(files_pattern)
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+
+        // 使用 rayon 来并行解析文件，不保证顺序
+        files.into_par_iter().for_each(|path| {
             if let Some(sp) = &search_pattern {
                 process_file(&path, sp);
             }
-        }
+        });
     }
 }
 
-fn process_file(path: &PathBuf, search_pattern: &SearchPattern) {
+fn process_file(path: &PathBuf, search_pattern: &Arc<SearchPattern>) {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(e) => {
@@ -58,6 +68,7 @@ fn process_file(path: &PathBuf, search_pattern: &SearchPattern) {
 
     let mut has_matches = false;
     let reader = BufReader::new(file);
+    let mut matched_lines = Vec::new();
 
     for (line_num, line) in reader.lines().enumerate() {
         // 使用 match 模式匹配代替 unwrap，添加错误处理
@@ -74,18 +85,27 @@ fn process_file(path: &PathBuf, search_pattern: &SearchPattern) {
             }
         };
 
-        if let Some(highlighted) = highlight_match(&line, line_num, search_pattern)
-            && !has_matches
-        {
-            println!("{}:", path.display());
-            has_matches = true;
-
-            println!("{}", highlighted);
+        if let Some(highlighted) = highlight_match(&line, line_num, search_pattern) {
+            if !has_matches {
+                has_matches = true;
+            }
+            matched_lines.push(highlighted);
+        }
+    }
+    // 一次性输出所有匹配行，减少锁竞争
+    if has_matches {
+        println!("{}:", path.display());
+        for line in matched_lines {
+            println!("{}", line);
         }
     }
 }
 
-fn highlight_match(line: &str, line_num: usize, search_pattern: &SearchPattern) -> Option<String> {
+fn highlight_match(
+    line: &str,
+    line_num: usize,
+    search_pattern: &Arc<SearchPattern>,
+) -> Option<String> {
     if line.contains(&search_pattern.text) {
         // 字符串精准匹配
         let pos = line.find(&search_pattern.text).unwrap();
