@@ -1,7 +1,6 @@
 use clap::Parser;
 use colored::Colorize;
 use glob::glob;
-use rayon::prelude::*;
 use regex::Regex;
 use std::sync::Arc;
 use std::{
@@ -28,7 +27,8 @@ struct SearchPattern {
     regex: Regex,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let cli = Cli::parse();
 
     // 提前编译正则表达式并包装在Arc中以便共享，在线程间共享需要将变量包裹在Arc里
@@ -48,16 +48,24 @@ fn main() {
             .filter_map(Result::ok)
             .collect::<Vec<_>>();
 
-        // 使用 rayon 来并行解析文件，不保证顺序
-        files.into_par_iter().for_each(|path| {
-            if let Some(sp) = &search_pattern {
-                process_file(&path, sp);
+        let mut tasks = Vec::new();
+
+        // 使用 tokio来异步解析文件
+        for path in files {
+            if let Some(sp) = search_pattern.clone() {
+                tasks.push(tokio::spawn(async move {
+                    process_file(&path, &sp).await;
+                }))
             }
-        });
+        }
+
+        for task in tasks {
+            let _ = task.await;
+        }
     }
 }
 
-fn process_file(path: &PathBuf, search_pattern: &Arc<SearchPattern>) {
+async fn process_file(path: &PathBuf, search_pattern: &Arc<SearchPattern>) {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(e) => {
